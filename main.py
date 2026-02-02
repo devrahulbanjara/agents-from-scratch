@@ -5,6 +5,9 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+from call_function import available_functions, call_function
+from prompts import system_prompt
+
 
 def main():
     parser = argparse.ArgumentParser(description="AI Code Assistant")
@@ -26,18 +29,57 @@ def main():
 
 
 def generate_content(client, messages, verbose):
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=messages,
-    )
-    if not response.usage_metadata:
-        raise RuntimeError("Gemini API response appears to be malformed")
+    # Agent loop - iterate up to 20 times
+    for iteration in range(20):
+        if verbose:
+            print(f"\n--- Iteration {iteration + 1} ---")
 
-    if verbose:
-        print("Prompt tokens:", response.usage_metadata.prompt_token_count)
-        print("Response tokens:", response.usage_metadata.candidates_token_count)
-    print("Response:")
-    print(response.text)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=messages,
+            config=types.GenerateContentConfig(
+                tools=[available_functions], system_instruction=system_prompt
+            ),
+        )
+
+        if not response.usage_metadata:
+            raise RuntimeError("Gemini API response appears to be malformed")
+
+        if verbose:
+            print("Prompt tokens:", response.usage_metadata.prompt_token_count)
+            print("Response tokens:", response.usage_metadata.candidates_token_count)
+
+        # Add model's response to conversation history
+        if response.candidates:
+            for candidate in response.candidates:
+                messages.append(candidate.content)
+
+        # Check if model wants to make function calls
+        if not response.function_calls:
+            print("Final response:")
+            print(response.text)
+            return  # Exit the loop - model has given final response
+
+        # Handle function calls
+        function_responses = []
+        for function_call in response.function_calls:
+            result = call_function(function_call, verbose)
+            if (
+                not result.parts
+                or not result.parts[0].function_response
+                or not result.parts[0].function_response.response
+            ):
+                raise RuntimeError(f"Empty function response for {function_call.name}")
+            if verbose:
+                print(f"-> {result.parts[0].function_response.response}")
+            function_responses.append(result.parts[0])
+
+        # Add function results to conversation history
+        messages.append(types.Content(role="user", parts=function_responses))
+
+    # If we reach here, we've hit the iteration limit
+    print("Maximum iterations reached. The agent did not provide a final response.")
+    exit(1)
 
 
 if __name__ == "__main__":
